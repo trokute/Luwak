@@ -12,7 +12,7 @@ You may report an issue or do a pull request.
 :=, ?., ??, =>
 ### Keywords:
 const, defer, type, enum, interface
-### Type annotation support (parsed and skipped
+### Type annotation support (parsed and skipped)
 ### Bitwise operator assignments
 ### String concatenation assignment
 
