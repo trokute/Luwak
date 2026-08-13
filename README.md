@@ -1,7 +1,26 @@
-# Lua
+# Luwak
 
-This is the repository of Lua development code, as seen by the Lua team. It contains the full history of all commits but is mirrored irregularly. For complete information about Lua, visit [Lua.org](https://www.lua.org/).
+This is a fork of Lua [Lua.org](https://www.lua.org/). 
 
-Please **do not** send pull requests. To report issues, post a message to the [Lua mailing list](https://www.lua.org/lua-l.html).
+You may report an issue or do a pull request.
 
-Download official Lua releases from [Lua.org](https://www.lua.org/download.html).
+## Currently Available:
+
+### Compund Comparator:
++=, -=, *=, /=, %=, //=, ^=, &=, |=, <<=, >>=, .=
+
+### Power operator:
+** (in addition to ^)
+
+### Advanced tokens:
+:=, ?., ??, =>
+
+### Keywords:
+const, defer, type, enum, interface
+
+### Type annotation support (parsed and skipped
+
+### Bitwise operator assignments
+
+### String concatenation assignment
+
