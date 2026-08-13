@@ -63,6 +63,7 @@ typedef struct BlockCnt {
 */
 static void statement (LexState *ls);
 static void expr (LexState *ls, expdesc *v);
+static void skipTypeAnnotation (LexState *ls);
 
 
 static l_noret error_expected (LexState *ls, int token) {
@@ -1065,22 +1066,22 @@ static void setvararg (FuncState *fs) {
 
 
 static void parlist (LexState *ls) {
-  /* parlist -> [ {NAME ','} (NAME | '...') ] */
   FuncState *fs = ls->fs;
   Proto *f = fs->f;
   int nparams = 0;
   int varargk = 0;
-  if (ls->t.token != ')') {  /* is 'parlist' not empty? */
+  if (ls->t.token != ')') {
     do {
       switch (ls->t.token) {
         case TK_NAME: {
           new_localvar(ls, str_checkname(ls));
+          skipTypeAnnotation(ls);
           nparams++;
           break;
         }
         case TK_DOTS: {
           varargk = 1;
-          luaX_next(ls);  /* skip '...' */
+          luaX_next(ls);
           if (ls->t.token == TK_NAME)
             new_varkind(ls, str_checkname(ls), RDKVAVAR);
           else
@@ -1094,10 +1095,9 @@ static void parlist (LexState *ls) {
   adjustlocalvars(ls, nparams);
   f->numparams = cast_byte(fs->nactvar);
   if (varargk) {
-    setvararg(fs);  /* declared vararg */
-    adjustlocalvars(ls, 1);  /* vararg parameter */
+    setvararg(fs);
+    adjustlocalvars(ls, 1);
   }
-  /* reserve registers for parameters (plus vararg parameter, if present) */
   luaK_reserveregs(fs, fs->nactvar);
 }
 
@@ -1334,6 +1334,7 @@ static BinOpr getbinopr (int op) {
     case '~': return OPR_BXOR;
     case TK_SHL: return OPR_SHL;
     case TK_SHR: return OPR_SHR;
+    case TK_POW: return OPR_POW;
     case TK_CONCAT: return OPR_CONCAT;
     case TK_NE: return OPR_NE;
     case TK_EQ: return OPR_EQ;
@@ -1473,7 +1474,6 @@ static void check_conflict (LexState *ls, struct LHS_assign *lh, expdesc *v) {
     }
   }
   if (conflict) {
-    /* copy upvalue/local value to a temporary (in position 'extra') */
     if (v->k == VLOCAL)
       luaK_codeABC(fs, OP_MOVE, extra, v->u.var.ridx, 0);
     else
@@ -1483,11 +1483,73 @@ static void check_conflict (LexState *ls, struct LHS_assign *lh, expdesc *v) {
 }
 
 
+static void skipTypeAnnotation (LexState *ls) {
+  if (ls->t.token == ':' && ls->lookahead.token != ':') {
+    int depth = 0;
+    luaX_next(ls);
+    while (ls->t.token != TK_EOS) {
+      if (ls->t.token == '<' || ls->t.token == '(') depth++;
+      else if (ls->t.token == '>' || ls->t.token == ')') depth--;
+      else if (depth == 0 && (ls->t.token == ',' || ls->t.token == '=' || 
+                              ls->t.token == TK_LOCAL || ls->t.token == ';' ||
+                              ls->t.token == TK_FUNCTION || ls->t.token == TK_IF ||
+                              ls->t.token == TK_FOR || ls->t.token == TK_WHILE))
+        break;
+      luaX_next(ls);
+    }
+  }
+}
+
+
 /* Create code to store the "top" register in 'var' */
 static void storevartop (FuncState *fs, expdesc *var) {
   expdesc e;
   init_exp(&e, VNONRELOC, fs->freereg - 1);
   luaK_storevar(fs, var, &e);  /* will also free the top register */
+}
+
+
+static int getcmpop (int tok) {
+  switch(tok) {
+    case TK_ADDEQ: return OPR_ADD;
+    case TK_SUBEQ: return OPR_SUB;
+    case TK_MULEQ: return OPR_MUL;
+    case TK_DIVEQ: return OPR_DIV;
+    case TK_MODEQ: return OPR_MOD;
+    case TK_IDIVEQ: return OPR_IDIV;
+    case TK_POWEQ: return OPR_POW;
+    case TK_BANDEQ: return OPR_BAND;
+    case TK_BOREQ: return OPR_BOR;
+    case TK_SHLEQ: return OPR_SHL;
+    case TK_SHREQ: return OPR_SHR;
+    case TK_CONEQ: return OPR_CONCAT;
+    default: return OPR_NOBINOPR;
+  }
+}
+
+
+static int iscmpop (int tok) {
+  return getcmpop(tok) != OPR_NOBINOPR;
+}
+
+
+static void cmpassign (LexState *ls, expdesc *lhs) {
+  FuncState *fs = ls->fs;
+  expdesc var, rhs;
+  int op = ls->t.token;
+  BinOpr binop = (BinOpr)getcmpop(op);
+  int line = ls->linenumber;
+  
+  check_readonly(ls, lhs);
+  
+  var = *lhs;
+  luaX_next(ls);
+  expr(ls, &rhs);
+  
+  luaK_infix(fs, binop, &var);
+  luaK_posfix(fs, binop, &var, &rhs, line);
+  
+  luaK_storevar(fs, lhs, &var);
 }
 
 
@@ -1819,40 +1881,39 @@ static void checktoclose (FuncState *fs, int level) {
 
 
 static void localstat (LexState *ls) {
-  /* stat -> LOCAL NAME attrib { ',' NAME attrib } ['=' explist] */
   FuncState *fs = ls->fs;
-  int toclose = -1;  /* index of to-be-closed variable (if any) */
-  Vardesc *var;  /* last variable */
-  int vidx;  /* index of last variable */
+  int toclose = -1;
+  Vardesc *var;
+  int vidx;
   int nvars = 0;
   int nexps;
   expdesc e;
-  /* get prefixed attribute (if any); default is regular local variable */
   lu_byte defkind = getvarattribute(ls, VDKREG);
-  do {  /* for each variable */
-    TString *vname = str_checkname(ls);  /* get its name */
-    lu_byte kind = getvarattribute(ls, defkind);  /* postfixed attribute */
-    vidx = new_varkind(ls, vname, kind);  /* predeclare it */
-    if (kind == RDKTOCLOSE) {  /* to-be-closed? */
-      if (toclose != -1)  /* one already present? */
+  do {
+    TString *vname = str_checkname(ls);
+    skipTypeAnnotation(ls);
+    lu_byte kind = getvarattribute(ls, defkind);
+    vidx = new_varkind(ls, vname, kind);
+    if (kind == RDKTOCLOSE) {
+      if (toclose != -1)
         luaK_semerror(ls, "multiple to-be-closed variables in local list");
       toclose = fs->nactvar + nvars;
     }
     nvars++;
   } while (testnext(ls, ','));
-  if (testnext(ls, '='))  /* initialization? */
+  if (testnext(ls, '='))
     nexps = explist(ls, &e);
   else {
     e.k = VVOID;
     nexps = 0;
   }
-  var = getlocalvardesc(fs, vidx);  /* retrieve last variable */
-  if (nvars == nexps &&  /* no adjustments? */
-      var->vd.kind == RDKCONST &&  /* last variable is const? */
-      luaK_exp2const(fs, &e, &var->k)) {  /* compile-time constant? */
-    var->vd.kind = RDKCTC;  /* variable is a compile-time constant */
-    adjustlocalvars(ls, nvars - 1);  /* exclude last variable */
-    fs->nactvar++;  /* but count it */
+  var = getlocalvardesc(fs, vidx);
+  if (nvars == nexps &&
+      var->vd.kind == RDKCONST &&
+      luaK_exp2const(fs, &e, &var->k)) {
+    var->vd.kind = RDKCTC;
+    adjustlocalvars(ls, nvars - 1);
+    fs->nactvar++;
   }
   else {
     adjust_assign(ls, nvars, nexps, &e);
@@ -2000,19 +2061,21 @@ static void funcstat (LexState *ls, int line) {
 
 
 static void exprstat (LexState *ls) {
-  /* stat -> func | assignment */
   FuncState *fs = ls->fs;
   struct LHS_assign v;
   suffixedexp(ls, &v.v);
-  if (ls->t.token == '=' || ls->t.token == ',') { /* stat -> assignment ? */
+  if (ls->t.token == '=' || ls->t.token == ',') {
     v.prev = NULL;
     restassign(ls, &v, 1);
   }
-  else {  /* stat -> func */
+  else if (iscmpop(ls->t.token)) {
+    cmpassign(ls, &v.v);
+  }
+  else {
     Instruction *inst;
     check_condition(ls, v.v.k == VCALL, "syntax error");
     inst = &getinstruction(fs, &v.v);
-    SETARG_C(*inst, 1);  /* call statement uses no results */
+    SETARG_C(*inst, 1);
   }
 }
 
